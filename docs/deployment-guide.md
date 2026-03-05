@@ -18,7 +18,7 @@ The new architecture provides:
 ```bash
 # Create dedicated database and user
 sudo -u postgres psql -c "CREATE DATABASE motorical_encrypted_imap;"
-sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD 'dhuy4532098uytvbGFFSE';"
+sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD '<DB_PASSWORD>';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE motorical_encrypted_imap TO encimap;"
 
 # Run the complete schema setup
@@ -37,7 +37,7 @@ sudo -u encimap psql -d motorical_encrypted_imap -c "SELECT COUNT(*) FROM vaultb
 #### **Backend API Environment** (`/etc/motorical/backend.env`)
 ```bash
 # Main platform database
-DATABASE_URL=postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db
+DATABASE_URL=postgresql://motorical:<DB_PASSWORD>@localhost:5432/motorical_db
 
 # JWT and other configs (existing)
 JWT_SECRET=your_jwt_secret
@@ -48,14 +48,14 @@ STRIPE_SECRET_KEY=sk_live_...
 #### **Encrypted IMAP API Environment** (`/etc/motorical/encimap.env`)
 ```bash
 # Encrypted IMAP database
-DATABASE_URL=postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap
+DATABASE_URL=postgresql://encimap:<DB_PASSWORD>@localhost:5432/motorical_encrypted_imap
 
 # S2S communication
 S2S_JWT_SECRET=your_s2s_secret
 
 # Dual database access for SMTP Auth (NEW)
-MOTORICAL_DATABASE_URL=postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db
-ENCIMAP_DATABASE_URL=postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap
+MOTORICAL_DATABASE_URL=postgresql://motorical:<DB_PASSWORD>@localhost:5432/motorical_db
+ENCIMAP_DATABASE_URL=postgresql://encimap:<DB_PASSWORD>@localhost:5432/motorical_encrypted_imap
 ```
 
 #### **Adapter Configuration** (Optional)
@@ -81,7 +81,7 @@ Add to `/etc/motorical/encimap.env`:
 
 ```bash
 # Existing variables
-DATABASE_URL=postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db
+DATABASE_URL=postgresql://motorical:<DB_PASSWORD>@localhost:5432/motorical_db
 MAILDIR_ROOT=/var/mail/vaultboxes
 API_PREFIX=/s2s/v1
 
@@ -127,7 +127,7 @@ curl -f http://localhost:3000/
    ```bash
    # Create dedicated database
    sudo -u postgres psql -c "CREATE DATABASE motorical_encrypted_imap;"
-   sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD 'dhuy4532098uytvbGFFSE';"
+   sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD '<DB_PASSWORD>';"
    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE motorical_encrypted_imap TO encimap;"
    
    # Run complete schema
@@ -317,11 +317,11 @@ environments:
 
 ```bash
 # Required - Encrypted IMAP Database (separate from Motorical)
-ENCIMAP_DATABASE_URL=postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap
+ENCIMAP_DATABASE_URL=postgresql://encimap:<DB_PASSWORD>@localhost:5432/motorical_encrypted_imap
 S2S_JWT_PUBLIC_BASE64=base64_encoded_public_key
 
 # Optional - Motorical Database (for SMTP auth integration)
-MOTORICAL_DATABASE_URL=postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db
+MOTORICAL_DATABASE_URL=postgresql://motorical:<DB_PASSWORD>@localhost:5432/motorical_db
 
 # Optional
 MOTORICAL_API_TOKEN=optional_for_internal_calls

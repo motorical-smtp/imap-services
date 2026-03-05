@@ -79,7 +79,7 @@ The Motorical Encrypted IMAP system uses a **dual database architecture** to mai
 ```sql
 -- Database: motorical_db
 -- User: motorical
--- Connection: postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db
+-- Connection: postgresql://motorical:<DB_PASSWORD>@localhost:5432/motorical_db
 -- Purpose: Main platform functionality, billing, user management
 ```
 
@@ -155,7 +155,7 @@ const motoricalAuthPool = new Pool({
 ```sql
 -- Database: motorical_encrypted_imap  
 -- User: encimap
--- Connection: postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap
+-- Connection: postgresql://encimap:<DB_PASSWORD>@localhost:5432/motorical_encrypted_imap
 -- Purpose: Encrypted email services, vaultboxes, S/MIME processing
 ```
 
@@ -459,12 +459,12 @@ const loadUserVaultboxes = async (userIds) => {
 ```bash
 # Setup motorical_db
 sudo -u postgres psql -c "CREATE DATABASE motorical_db;"
-sudo -u postgres psql -c "CREATE USER motorical WITH PASSWORD 'dhuy4532098uytvbGFFSE';"
+sudo -u postgres psql -c "CREATE USER motorical WITH PASSWORD '<DB_PASSWORD>';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE motorical_db TO motorical;"
 
 # Setup motorical_encrypted_imap
 sudo -u postgres psql -c "CREATE DATABASE motorical_encrypted_imap;"
-sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD 'dhuy4532098uytvbGFFSE';"
+sudo -u postgres psql -c "CREATE USER encimap WITH PASSWORD '<DB_PASSWORD>';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE motorical_encrypted_imap TO encimap;"
 
 # Apply migrations (including recent v2.1 updates)

@@ -12,12 +12,12 @@ export class SmtpAuthService {
   constructor(config = {}) {
     // Main Motorical database for regular motorblocks
     this.motoricalPool = new Pool({
-      connectionString: config.motoricalDbUrl || process.env.MOTORICAL_DATABASE_URL || 'postgresql://motorical:dhuy4532098uytvbGFFSE@localhost:5432/motorical_db'
+      connectionString: config.motoricalDbUrl || process.env.MOTORICAL_DATABASE_URL
     });
     
     // Encrypted IMAP database for vaultbox credentials  
     this.encimapPool = new Pool({
-      connectionString: config.encimapDbUrl || process.env.ENCIMAP_DATABASE_URL || 'postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap'
+      connectionString: config.encimapDbUrl || process.env.ENCIMAP_DATABASE_URL
     });
     
     this.debug = config.debug || false;

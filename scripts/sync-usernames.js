@@ -6,7 +6,7 @@
 import { Pool } from 'pg';
 
 const pool = new Pool({
-  connectionString: process.env.ENCIMAP_DATABASE_URL || 'postgresql://encimap:dhuy4532098uytvbGFFSE@localhost:5432/motorical_encrypted_imap'
+  connectionString: process.env.ENCIMAP_DATABASE_URL
 });
 
 /**
