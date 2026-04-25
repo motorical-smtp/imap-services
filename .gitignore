@@ -15,3 +15,11 @@ google.com*.xml
 
 # Usage reports
 usage-report*.csv
+*.bak
+*.backup
+*.backup.*
+*.sql
+*.dump
+*.zip
+*.tar
+*.tar.gz

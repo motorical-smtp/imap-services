@@ -22,7 +22,7 @@ adapters:
   user:
     type: "motorical"
     config:
-      api_base_url: "http://localhost:3001"
+      api_base_url: "${MOTORICAL_BACKEND_API_URL}"
       database_url: "${MOTORICAL_DATABASE_URL}"
       use_api: false  # Use direct database access for better performance
   

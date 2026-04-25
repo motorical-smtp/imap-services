@@ -8,6 +8,9 @@
 import express from 'express';
 import { loadAdapters, getAdapter } from '../../config/adapter-loader.js';
 import VaultboxSmtpService from '../core/vaultbox-smtp-service.js';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+const execFileAsync = promisify(execFile);
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -659,28 +662,116 @@ app.get('/s2s/v1/usage', async (req, res) => {
       return res.status(403).json({ success: false, error: 'access denied' });
     }
 
-    // Get usage statistics with message counts and storage
-    const result = await adapters.storage.query(`
-      SELECT 
-        v.id as vaultbox_id,
-        v.domain,
-        COUNT(m.id) as message_count,
-        COALESCE(SUM(m.size_bytes), 0) as total_bytes,
-        MAX(m.received_at) as last_received
-      FROM vaultboxes v
-      LEFT JOIN messages m ON m.vaultbox_id = v.id
-      WHERE v.user_id = $1
-      GROUP BY v.id, v.domain
-      ORDER BY last_received DESC NULLS LAST, v.created_at DESC
+    // Get vaultboxes for user
+    const vaultboxesResult = await adapters.storage.query(`
+      SELECT id, domain, mailbox_type, alias
+      FROM vaultboxes
+      WHERE user_id = $1
     `, [userId]);
 
-    const usage = result.rows.map(row => ({
-      vaultbox_id: row.vaultbox_id,
-      domain: row.domain,
-      message_count: Number(row.message_count || 0),
-      total_bytes: Number(row.total_bytes || 0),
-      last_received: row.last_received
-    }));
+    const usage = [];
+
+    for (const vaultbox of vaultboxesResult.rows) {
+      if (vaultbox.mailbox_type === 'encrypted') {
+        // Encrypted mailboxes: query messages table
+        const result = await adapters.storage.query(`
+          SELECT 
+            COUNT(*)::int as message_count,
+            COALESCE(SUM(size_bytes), 0)::bigint as total_bytes,
+            MAX(received_at) as last_received
+          FROM messages
+          WHERE vaultbox_id = $1
+        `, [vaultbox.id]);
+
+        const row = result.rows[0];
+        usage.push({
+          vaultbox_id: vaultbox.id,
+          domain: vaultbox.domain,
+          mailbox_type: 'encrypted',
+          message_count: Number(row?.message_count || 0),
+          total_bytes: Number(row?.total_bytes || 0),
+          last_received: row?.last_received || null
+        });
+      } else if (vaultbox.mailbox_type === 'simple') {
+        // Simple mailboxes: read Maildir
+        try {
+          const fs = await import('fs').then(m => m.promises);
+          const path = await import('path');
+          const maildirRoot = process.env.MAILDIR_ROOT || '/var/mail/vaultboxes';
+          
+          // Get IMAP username for simple mailbox
+          const credResult = await adapters.storage.query(`
+            SELECT username FROM imap_app_credentials
+            WHERE vaultbox_id = $1
+            LIMIT 1
+          `, [vaultbox.id]);
+          
+          if (credResult.rows && credResult.rows[0]) {
+            const imapUsername = credResult.rows[0].username;
+            const maildirPath = path.default.join(maildirRoot, imapUsername, 'Maildir');
+            
+            let messageCount = 0;
+            let totalBytes = 0;
+            let lastReceived = null;
+
+            // Check new and cur directories
+            for (const subdir of ['new', 'cur']) {
+              const dirPath = path.default.join(maildirPath, subdir);
+              try {
+                const files = await fs.readdir(dirPath);
+                messageCount += files.length;
+                
+                // Get file stats for size and last modified
+                for (const file of files) {
+                  try {
+                    const filePath = path.default.join(dirPath, file);
+                    const stats = await fs.stat(filePath);
+                    totalBytes += stats.size;
+                    if (!lastReceived || stats.mtime > lastReceived) {
+                      lastReceived = stats.mtime;
+                    }
+                  } catch (fileErr) {
+                    // Skip individual file errors
+                  }
+                }
+              } catch (dirErr) {
+                // Directory doesn't exist or can't be read - skip
+              }
+            }
+
+            usage.push({
+              vaultbox_id: vaultbox.id,
+              domain: vaultbox.domain,
+              mailbox_type: 'simple',
+              message_count: messageCount,
+              total_bytes: totalBytes,
+              last_received: lastReceived ? new Date(lastReceived).toISOString() : null
+            });
+          } else {
+            // No IMAP credentials yet - return zero usage
+            usage.push({
+              vaultbox_id: vaultbox.id,
+              domain: vaultbox.domain,
+              mailbox_type: 'simple',
+              message_count: 0,
+              total_bytes: 0,
+              last_received: null
+            });
+          }
+        } catch (maildirError) {
+          console.warn(`[EncimapAPI] Error reading Maildir for vaultbox ${vaultbox.id}:`, maildirError.message);
+          // Return zero usage on error
+          usage.push({
+            vaultbox_id: vaultbox.id,
+            domain: vaultbox.domain,
+            mailbox_type: 'simple',
+            message_count: 0,
+            total_bytes: 0,
+            last_received: null
+          });
+        }
+      }
+    }
 
     console.log(`[EncimapAPI] Usage query for user ${userId}: ${usage.length} vaultboxes, ${usage.reduce((sum, u) => sum + u.message_count, 0)} total messages`);
 
@@ -1708,6 +1799,225 @@ app.get('/s2s/v1/admin/adapters/status', async (req, res) => {
  * Format: encimap-{domain-with-hyphens}-{random-suffix}
  * This ensures both IMAP and SMTP use the same standardized format
  */
+
+
+// ====================================================================
+// FIREWALL MANAGEMENT API ENDPOINTS (for OVH24 Backend)
+// ====================================================================
+// These endpoints manage iptables port forwarding and UFW rules
+// on the mail host via HTTP API calls from OVH24.
+
+const FIREWALL_TARGET_PORT = 2587;
+const FIREWALL_COMMAND_TIMEOUT_MS = 10000;
+
+function parseTcpPort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+function normalizeUfwComment(comment) {
+  if (!comment) {
+    return null;
+  }
+
+  const normalized = String(comment).trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/[\x00-\x1F\x7F]/.test(normalized) || normalized.length > 128) {
+    throw new Error('Invalid UFW comment');
+  }
+
+  return normalized;
+}
+
+async function runFirewallCommand(command, args) {
+  return execFileAsync(command, args, {
+    timeout: FIREWALL_COMMAND_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024
+  });
+}
+
+function iptablesPortForwardArgs(action, port, targetPort = FIREWALL_TARGET_PORT) {
+  return [
+    '-t', 'nat', action, 'PREROUTING',
+    '-p', 'tcp', '--dport', String(port),
+    '-j', 'REDIRECT', '--to-port', String(targetPort)
+  ];
+}
+
+async function getUfwStatus() {
+  const { stdout } = await runFirewallCommand('ufw', ['status', 'numbered']);
+  return stdout || '';
+}
+
+function ufwStatusHasPort(statusOutput, port) {
+  return new RegExp(`\\b${port}/tcp\\b`).test(statusOutput);
+}
+
+// Firewall routes require S2S authentication
+app.use('/api/internal/firewall', authenticateS2S);
+
+// GET /api/internal/firewall/check-port-forward/:port
+app.get('/api/internal/firewall/check-port-forward/:port', async (req, res) => {
+  try {
+    const port = parseTcpPort(req.params.port);
+    if (!port) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    try {
+      await runFirewallCommand('iptables', iptablesPortForwardArgs('-C', port));
+      res.json({ exists: true, targetPort: FIREWALL_TARGET_PORT });
+    } catch (checkError) {
+      res.json({ exists: false });
+    }
+  } catch (error) {
+    console.error('[EncimapAPI] Check port forward error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/internal/firewall/port-forward
+app.post('/api/internal/firewall/port-forward', async (req, res) => {
+  try {
+    const { port, targetPort } = req.body || {};
+    const portNum = parseTcpPort(port);
+    const targetPortNum = targetPort === undefined ? FIREWALL_TARGET_PORT : parseTcpPort(targetPort);
+    if (!portNum || !targetPortNum) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    try {
+      await runFirewallCommand('iptables', iptablesPortForwardArgs('-C', portNum, targetPortNum));
+      return res.json({ success: true, created: false, message: 'Port forwarding already exists' });
+    } catch (checkError) {
+      await runFirewallCommand('iptables', iptablesPortForwardArgs('-A', portNum, targetPortNum));
+      console.log(`[EncimapAPI] Created iptables port forwarding: ${portNum} -> ${targetPortNum}`);
+      return res.json({ success: true, created: true, message: 'Port forwarding created successfully' });
+    }
+  } catch (error) {
+    console.error('[EncimapAPI] Create port forward error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /api/internal/firewall/port-forward/:port
+app.delete('/api/internal/firewall/port-forward/:port', async (req, res) => {
+  try {
+    const port = parseTcpPort(req.params.port);
+    if (!port) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    try {
+      await runFirewallCommand('iptables', iptablesPortForwardArgs('-D', port));
+      console.log(`[EncimapAPI] Removed iptables port forwarding: ${port} -> ${FIREWALL_TARGET_PORT}`);
+      res.json({ success: true, message: 'Port forwarding removed successfully' });
+    } catch (error) {
+      console.warn(`[EncimapAPI] Port forwarding rule for ${port} may not exist:`, error.message);
+      res.json({ success: true, message: 'Port forwarding rule not found (may already be removed)' });
+    }
+  } catch (error) {
+    console.error('[EncimapAPI] Remove port forward error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/internal/firewall/check-ufw/:port
+app.get('/api/internal/firewall/check-ufw/:port', async (req, res) => {
+  try {
+    const port = parseTcpPort(req.params.port);
+    if (!port) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    try {
+      const statusOutput = await getUfwStatus();
+      res.json({ exists: ufwStatusHasPort(statusOutput, port) });
+    } catch (checkError) {
+      res.json({ exists: false });
+    }
+  } catch (error) {
+    console.error('[EncimapAPI] Check UFW error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/internal/firewall/ufw-rule
+app.post('/api/internal/firewall/ufw-rule', async (req, res) => {
+  try {
+    const { port, comment } = req.body || {};
+    const portNum = parseTcpPort(port);
+    if (!portNum) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    const statusOutput = await getUfwStatus();
+    if (ufwStatusHasPort(statusOutput, portNum)) {
+      return res.json({ success: true, created: false, message: 'UFW rule already exists' });
+    }
+
+    const args = ['allow', `${portNum}/tcp`];
+    const commentValue = normalizeUfwComment(comment);
+    if (commentValue) {
+      args.push('comment', commentValue);
+    }
+
+    await runFirewallCommand('ufw', args);
+    console.log(`[EncimapAPI] Created UFW rule for port ${portNum}`);
+    return res.json({ success: true, created: true, message: 'UFW rule created successfully' });
+  } catch (error) {
+    console.error('[EncimapAPI] Create UFW rule error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /api/internal/firewall/ufw-rule/:port
+app.delete('/api/internal/firewall/ufw-rule/:port', async (req, res) => {
+  try {
+    const port = parseTcpPort(req.params.port);
+    if (!port) {
+      return res.status(400).json({ success: false, error: 'Invalid port number' });
+    }
+    try {
+      await runFirewallCommand('ufw', ['delete', 'allow', `${port}/tcp`]);
+      console.log(`[EncimapAPI] Removed UFW rule for port ${port}`);
+      res.json({ success: true, message: 'UFW rule removed successfully' });
+    } catch (error) {
+      console.warn(`[EncimapAPI] UFW rule for ${port} may not exist:`, error.message);
+      res.json({ success: true, message: 'UFW rule not found (may already be removed)' });
+    }
+  } catch (error) {
+    console.error('[EncimapAPI] Remove UFW rule error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/internal/firewall/rules
+app.get('/api/internal/firewall/rules', async (req, res) => {
+  try {
+    const iptablesOutput = await runFirewallCommand('iptables', ['-t', 'nat', '-L', 'PREROUTING', '-n']);
+    const iptablesPorts = [];
+    const lines = iptablesOutput.stdout.split('\n');
+    for (const line of lines) {
+      const match = line.match(/dpt:(\d+).*redir ports (\d+)/);
+      if (match) {
+        iptablesPorts.push(parseInt(match[1]));
+      }
+    }
+
+    const ufwOutput = await getUfwStatus();
+    const ufwPorts = [...ufwOutput.matchAll(/\b(\d+)\/tcp\b/g)]
+      .map(match => parseInt(match[1]))
+      .filter(port => !isNaN(port));
+
+    res.json({ 
+      iptables: [...new Set(iptablesPorts)].sort((a, b) => a - b),
+      ufw: [...new Set(ufwPorts)].sort((a, b) => a - b)
+    });
+  } catch (error) {
+    console.error('[EncimapAPI] Get firewall rules error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 function generateUnifiedUsername(domain, vaultboxId) {
   // Normalize domain (replace dots with hyphens, remove special chars)
   const normalizedDomain = domain
